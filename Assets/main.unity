@@ -130,7 +130,6 @@ GameObject:
   m_Component:
   - component: {fileID: 708399411}
   - component: {fileID: 708399410}
-  - component: {fileID: 708399409}
   - component: {fileID: 708399408}
   m_Layer: 0
   m_Name: Main Camera
@@ -152,28 +151,18 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   UnitCubeMesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}
-  FrustumMesh: {fileID: 0}
   DefaultMaterial: {fileID: 10302, guid: 0000000000000000f000000000000000, type: 0}
   RandomDistanceH: 350
   RandomDistanceV: 50
-  RandomExtentLimitX: 28
-  RandomExtentLimitY: 22
-  RandomExtentLimitZ: 35
+  RandomExtentLimitX: 6
+  RandomExtentLimitY: 12
+  RandomExtentLimitZ: 8
   RandomizeBoxes: 0
-  NumMeshTranforms: 16384
+  NumMeshTransforms: 100000
   TestFrustumCorners: 1
-  TestFrustumNative: 0
-  TestFrustumParallel: 0
-  TestFrustumParallelBurst: 1
   NumMeshesToDraw: 54
---- !u!81 &708399409
-AudioListener:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 708399407}
-  m_Enabled: 1
+  CullingJobType: 1
+  CullingJobParallel: 0
 --- !u!20 &708399410
 Camera:
   m_ObjectHideFlags: 0
@@ -198,7 +187,7 @@ Camera:
     width: 1
     height: 1
   near clip plane: 0.3
-  far clip plane: 220
+  far clip plane: 2500
   field of view: 60
   orthographic: 0
   orthographic size: 5
@@ -224,13 +213,13 @@ Transform:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 708399407}
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 1, z: -10}
+  m_LocalRotation: {x: 0.08715578, y: 0, z: 0, w: 0.9961947}
+  m_LocalPosition: {x: 0, y: 130, z: -10}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_Children: []
   m_Father: {fileID: 0}
   m_RootOrder: 0
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 20, y: 0, z: 0}
 --- !u!1 &1431068669
 GameObject:
   m_ObjectHideFlags: 0

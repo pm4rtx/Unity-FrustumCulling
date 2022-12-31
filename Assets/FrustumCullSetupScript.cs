@@ -2,9 +2,32 @@
 using UnityEngine;
 using UnityEngine.Rendering;
 
+#if UNITY_2019_1_OR_NEWER
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
+using Unity.Collections.LowLevel.Unsafe;
+
+public static class NativeArrayExtensions
+{
+    public static unsafe System.IntPtr GetNativePtr<T>(this NativeArray<T> a) where T : struct
+    {
+        return new System.IntPtr(a.GetUnsafeReadOnlyPtr());
+    }
+}
+
+#else
+using UnityEngine.Collections;
+
+public static class NativeArrayExtensions
+{
+    public static System.IntPtr GetNativePtr<T>(this NativeArray<T> a) where T : struct
+    {
+        return a.UnsafeReadOnlyPtr;
+    }
+}
+
+#endif
 
 
 public class FrustumCullSetupScript : MonoBehaviour
@@ -13,12 +36,19 @@ public class FrustumCullSetupScript : MonoBehaviour
     const float kMinExtendY = 0.1f;
     const float kMinExtendZ = 0.1f;
 
+    // NOTE: see this https://docs.unity3d.com/ScriptReference/Graphics.DrawMeshInstanced.html
+    const uint kMaxMeshesPerDrawBatch = 1023;
+
     public enum JobType
     {
         ReferenceSerialOnly,
-        NativePluginSerialOnly,
+        NativePluginSimd4SSE2,
+        NativePluginSimd4AVX,
+        NativePluginSimd8AVX,
+#if UNITY_2019_1_OR_NEWER
         MathematicsNoBurst,
         MathematicsBurstOptimized
+#endif
     };
 
     struct PinnedArray<T>
@@ -85,28 +115,18 @@ public class FrustumCullSetupScript : MonoBehaviour
     public bool RandomizeBoxes = true;
 
     [Range(16, 8192 << 4)]
-    public int NumMeshTranforms = 16;
+    public int NumMeshTransforms = 16;
     private int PrevNumMeshTransforms = 0;
     private Matrix4x4 [] MeshTransforms;
 
-    private byte[] VisibilityMaskForParallel;
-    private NativeArray<Vector4> BoxesMinMaxAoSoANative;
+    private NativeArray<byte> VisibilityMask;
+    private NativeArray<BoxMinMaxSoA> BoxesMinMaxAoSoA;
 
     public bool TestFrustumCorners = false;
 
     public int NumMeshesToDraw = 0;
 
-    CullingJob_Parallel ParallelCullingJob;
-    CullingJob_ParallelNoBurst ParallelCullingJobNoBurst;
-
-    CullingJob_Serial SerialCullingJob;
-    CullingJob_SerialNoBurst SerialCullingJobNoBurst;
-
-    Unity.Jobs.JobHandle CullingJobHandle;
-
     PinnedArray<Vector4>    FrustumData;
-    PinnedArray<Vector4>    BoxesMinMaxAoSoA;
-    PinnedArray<byte>       VisibilityMask;
 
     public JobType CullingJobType = JobType.ReferenceSerialOnly;
     public bool CullingJobParallel = false;
@@ -145,24 +165,7 @@ public class FrustumCullSetupScript : MonoBehaviour
         return Vector3.Normalize(Vector3.Cross((Vector3)Plane0, (Vector3)Plane1));
     }
 
-    private Vector3 RandomCenter()
-    {
-        var center = Vector3.zero;
-        center.x = UnityEngine.Random.value * RandomDistanceH * 2.0f - RandomDistanceH;
-        center.z = UnityEngine.Random.value * RandomDistanceH * 2.0f - RandomDistanceH;
-        center.y = UnityEngine.Random.value * RandomDistanceV * 2.0f - RandomDistanceV;
-        return center;
-    }
-
-    private Vector3 RandomExtent()
-    {
-        var extent = Vector3.zero;
-        extent.x = RandomExtentLimitX + UnityEngine.Random.value * (RandomExtentLimitX - kMinExtendX);
-        extent.y = RandomExtentLimitY + UnityEngine.Random.value * (RandomExtentLimitY - kMinExtendY);
-        extent.z = RandomExtentLimitZ + UnityEngine.Random.value * (RandomExtentLimitZ - kMinExtendZ);
-        return extent;
-    }
-
+#if UNITY_2019_1_OR_NEWER
     struct FrustumCullingJobData
     {
         [ReadOnly]
@@ -192,51 +195,12 @@ public class FrustumCullSetupScript : MonoBehaviour
 
         public bool TestFrustumCorners;
 
-        static private float4 MaxDotProduct(
-            float4 MinX,
-            float4 MaxX,
-            float4 MinY,
-            float4 MaxY,
-            float4 MinZ,
-            float4 MaxZ,
-            float4 Plane)
+        static private float4 MaxDotProduct(float4 MinX, float4 MaxX, float4 MinY, float4 MaxY, float4 MinZ, float4 MaxZ,float4 Plane)
         {
             return math.max(MinX * Plane.x, MaxX * Plane.x) +
                    math.max(MinY * Plane.y, MaxY * Plane.y) +
                    math.max(MinZ * Plane.z, MaxZ * Plane.z) +
                    Plane.wwww;
-        }
-
-        public void OnSchedule(ref NativeArray<Vector4> InBoxMinMaxAoSoA, ref Vector4[] InFrustumData, bool InTestCorners)
-        {
-            var BoxMinMaxAoSoASlice = InBoxMinMaxAoSoA.Slice().SliceConvert<BoxMinMaxSoA>();
-
-            MinXSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(0);
-            MaxXSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(16);
-            MinYSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(32);
-            MaxYSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(48);
-            MinZSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(64);
-            MaxZSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(80);
-
-            Frustum_Plane0 = InFrustumData[0];
-            Frustum_Plane1 = InFrustumData[1];
-            Frustum_Plane2 = InFrustumData[2];
-            Frustum_Plane3 = InFrustumData[3];
-            Frustum_Plane4 = InFrustumData[4];
-            Frustum_Plane5 = InFrustumData[5];
-            Frustum_xXyY = InFrustumData[6];
-            Frustum_zZzZ = InFrustumData[7];
-
-            VisibilityMask = new NativeArray<byte>(BoxMinMaxAoSoASlice.Length, Allocator.TempJob);
-
-            TestFrustumCorners = InTestCorners;
-        }
-
-        public void OnComplete(ref byte[] OutVisibilityMask)
-        {
-            UnityEngine.Assertions.Assert.IsTrue(VisibilityMask.IsCreated);
-            VisibilityMask.CopyTo(OutVisibilityMask);
-            VisibilityMask.Dispose();
         }
 
         public void ComputeVisibility(int i)
@@ -259,7 +223,7 @@ public class FrustumCullSetupScript : MonoBehaviour
             Mask |= math.asuint(MaxDotProduct(MinX, MaxX, MinY, MaxY, MinZ, MaxZ, Frustum_Plane5));
 
             // frustum is fully outside of any box plane
-            //if (TestFrustumCorners)
+            if (TestFrustumCorners)
             {
                 Mask |= math.asuint(Frustum_xXyY.yyyy - MinX);
                 Mask |= math.asuint(Frustum_xXyY.wwww - MinY);
@@ -281,51 +245,27 @@ public class FrustumCullSetupScript : MonoBehaviour
 
     public interface ICullingJob
     {
-        Unity.Jobs.JobHandle Run(ref NativeArray<Vector4> InBoxMinMaxAoSoA, ref Vector4[] FrustumData, bool TestFrustumCorners);
-        void Complete(Unity.Jobs.JobHandle Handle, ref byte[] VisibilityMask);
+        void RunParallelAndWait();
+        void RunSerial();
     }
 
-    struct CullingJob_SerialNoBurst : Unity.Jobs.IJob, ICullingJob
+    struct FrustumCullBoxesAoSoAJob_NoBurst : Unity.Jobs.IJobParallelFor, ICullingJob
     {
         public FrustumCullingJobData JobData;
 
-        public Unity.Jobs.JobHandle Run(ref NativeArray<Vector4> InBoxMinMaxAoSoA, ref Vector4[] FrustumData, bool TestFrustumCorners)
+        public FrustumCullBoxesAoSoAJob_NoBurst(ref FrustumCullingJobData Data)
         {
-            JobData.OnSchedule(ref InBoxMinMaxAoSoA, ref FrustumData, TestFrustumCorners);
-            return this.Schedule();
+            JobData = Data;
         }
 
-        public void Complete(Unity.Jobs.JobHandle Handle, ref byte[] VisibilityMask)
+        public void RunParallelAndWait()
         {
-            Handle.Complete();
-            UnityEngine.Assertions.Assert.IsTrue(Handle.IsCompleted);
-            JobData.OnComplete(ref VisibilityMask);
+            this.Schedule(JobData.VisibilityMask.Length, 32).Complete();
         }
 
-        public void Execute()
+        public void RunSerial()
         {
-            for (int i = 0; i < JobData.VisibilityMask.Length; ++i)
-            {
-                JobData.ComputeVisibility(i);
-            }
-        }
-    }
-
-    struct CullingJob_ParallelNoBurst : Unity.Jobs.IJobParallelFor, ICullingJob
-    {
-        public FrustumCullingJobData JobData;
-
-        public Unity.Jobs.JobHandle Run(ref NativeArray<Vector4> InBoxMinMaxAoSoA, ref Vector4[] FrustumData, bool TestFrustumCorners)
-        {
-            JobData.OnSchedule(ref InBoxMinMaxAoSoA, ref FrustumData, TestFrustumCorners);
-            return this.Schedule(JobData.VisibilityMask.Length, 32);
-        }
-
-        public void Complete(Unity.Jobs.JobHandle Handle, ref byte[] VisibilityMask)
-        {
-            Handle.Complete();
-            UnityEngine.Assertions.Assert.IsTrue(Handle.IsCompleted);
-            JobData.OnComplete(ref VisibilityMask);
+            this.Run(JobData.VisibilityMask.Length);
         }
 
         public void Execute(int i)
@@ -335,48 +275,23 @@ public class FrustumCullSetupScript : MonoBehaviour
     }
 
     [Unity.Burst.BurstCompile]
-    struct CullingJob_Serial : Unity.Jobs.IJob, ICullingJob
+    struct FrustumCullBoxesAoSoAJob : Unity.Jobs.IJobParallelFor, ICullingJob
     {
         public FrustumCullingJobData JobData;
 
-        public Unity.Jobs.JobHandle Run(ref NativeArray<Vector4> InBoxMinMaxAoSoA, ref Vector4[] FrustumData, bool TestFrustumCorners)
+        public FrustumCullBoxesAoSoAJob(ref FrustumCullingJobData Data)
         {
-            JobData.OnSchedule(ref InBoxMinMaxAoSoA, ref FrustumData, TestFrustumCorners);
-            return this.Schedule();
+            JobData = Data;
         }
 
-        public void Complete(Unity.Jobs.JobHandle Handle, ref byte[] VisibilityMask)
+        public void RunParallelAndWait()
         {
-            Handle.Complete();
-            UnityEngine.Assertions.Assert.IsTrue(Handle.IsCompleted);
-            JobData.OnComplete(ref VisibilityMask);
+            this.Schedule(JobData.VisibilityMask.Length, 32).Complete();
         }
 
-        public void Execute()
+        public void RunSerial()
         {
-            for (int i = 0; i < JobData.VisibilityMask.Length; ++i)
-            {
-                JobData.ComputeVisibility(i);
-            }
-        }
-    }
-
-    [Unity.Burst.BurstCompile]
-    struct CullingJob_Parallel : Unity.Jobs.IJobParallelFor, ICullingJob
-    {
-        public FrustumCullingJobData JobData;
-
-        public Unity.Jobs.JobHandle Run(ref NativeArray<Vector4> InBoxMinMaxAoSoA, ref Vector4[] FrustumData, bool TestFrustumCorners)
-        {
-            JobData.OnSchedule(ref InBoxMinMaxAoSoA, ref FrustumData, TestFrustumCorners);
-            return this.Schedule(JobData.VisibilityMask.Length, 32);
-        }
-
-        public void Complete(Unity.Jobs.JobHandle Handle, ref byte[] VisibilityMask)
-        {
-            Handle.Complete();
-            UnityEngine.Assertions.Assert.IsTrue(Handle.IsCompleted);
-            JobData.OnComplete(ref VisibilityMask);
+            this.Run(JobData.VisibilityMask.Length);
         }
 
         public void Execute(int i)
@@ -385,8 +300,9 @@ public class FrustumCullSetupScript : MonoBehaviour
         }
     }
 
+#endif
 
-    struct BoxMinMaxSoA
+    public struct BoxMinMaxSoA
     {
         public Vector4 MinX;
         public Vector4 MaxX;
@@ -395,88 +311,112 @@ public class FrustumCullSetupScript : MonoBehaviour
         public Vector4 MinZ;
         public Vector4 MaxZ;
 
-        public BoxMinMaxSoA(ref Vector4[] InBoxMinMaxAoSoA, int i)
+        static private Vector3 RandomCenter(Vector2 RandomDistance)
         {
-            MinX = InBoxMinMaxAoSoA[i * 6 + 0];
-            MaxX = InBoxMinMaxAoSoA[i * 6 + 1];
-            MinY = InBoxMinMaxAoSoA[i * 6 + 2];
-            MaxY = InBoxMinMaxAoSoA[i * 6 + 3];
-            MinZ = InBoxMinMaxAoSoA[i * 6 + 4];
-            MaxZ = InBoxMinMaxAoSoA[i * 6 + 5];
+            var center = Vector3.zero;
+            center.x = UnityEngine.Random.value * RandomDistance.x * 2.0f - RandomDistance.x;
+            center.z = UnityEngine.Random.value * RandomDistance.x * 2.0f - RandomDistance.x;
+            center.y = UnityEngine.Random.value * RandomDistance.y * 2.0f - RandomDistance.y;
+            return center;
         }
 
-        public void SetFromVector4Array(ref Vector4[] InBoxMinMaxAoSoA, int i)
+        static private Vector3 RandomExtent(Vector3 RandomExtendLimit)
         {
-            MinX = InBoxMinMaxAoSoA[i * 6 + 0];
-            MaxX = InBoxMinMaxAoSoA[i * 6 + 1];
-            MinY = InBoxMinMaxAoSoA[i * 6 + 2];
-            MaxY = InBoxMinMaxAoSoA[i * 6 + 3];
-            MinZ = InBoxMinMaxAoSoA[i * 6 + 4];
-            MaxZ = InBoxMinMaxAoSoA[i * 6 + 5];
+            var extent = Vector3.zero;
+            extent.x = RandomExtendLimit.x + UnityEngine.Random.value * (RandomExtendLimit.x - kMinExtendX);
+            extent.y = RandomExtendLimit.y + UnityEngine.Random.value * (RandomExtendLimit.y - kMinExtendY);
+            extent.z = RandomExtendLimit.z + UnityEngine.Random.value * (RandomExtendLimit.z - kMinExtendZ);
+            return extent;
+        }
+
+        static public BoxMinMaxSoA MakeRandom(Vector3 RandomExtendLimit, Vector2 RandomDistance)
+        {
+            var b = new BoxMinMaxSoA();
+            var c0 = RandomCenter(RandomDistance);
+            var e0 = RandomExtent(RandomExtendLimit);
+
+            var c1 = RandomCenter(RandomDistance);
+            var e1 = RandomExtent(RandomExtendLimit);
+
+            var c2 = RandomCenter(RandomDistance);
+            var e2 = RandomExtent(RandomExtendLimit);
+
+            var c3 = RandomCenter(RandomDistance);
+            var e3 = RandomExtent(RandomExtendLimit);
+
+            b.MinX = new Vector4(c0[0] - e0[0], c1[0] - e1[0], c2[0] - e2[0], c3[0] - e3[0]);
+            b.MaxX = new Vector4(c0[0] + e0[0], c1[0] + e1[0], c2[0] + e2[0], c3[0] + e3[0]);
+            b.MinY = new Vector4(c0[1] - e0[1], c1[1] - e1[1], c2[1] - e2[1], c3[1] - e3[1]);
+            b.MaxY = new Vector4(c0[1] + e0[1], c1[1] + e1[1], c2[1] + e2[1], c3[1] + e3[1]);
+            b.MinZ = new Vector4(c0[2] - e0[2], c1[2] - e1[2], c2[2] - e2[2], c3[2] - e3[2]);
+            b.MaxZ = new Vector4(c0[2] + e0[2], c1[2] + e1[2], c2[2] + e2[2], c3[2] + e3[2]);
+            return b;
+        }
+
+        public void ToTransformMatrix(ref Matrix4x4[] OutTransforms, int OutTransformIdx, int ComponentIdx)
+        {
+            var Min = new Vector3(MinX[ComponentIdx], MinY[ComponentIdx], MinZ[ComponentIdx]);
+            var Max = new Vector3(MaxX[ComponentIdx], MaxY[ComponentIdx], MaxZ[ComponentIdx]);
+            OutTransforms[OutTransformIdx].SetTRS((Max + Min) * 0.5f, Quaternion.identity, (Max - Min) * 0.5f);
         }
     }
 
-    static private int SetupTRS(
-        int TransformIdx,
+    static private void FilterOutCulledBoxes(
+        ref int InOutSoAPacketStart,
+        ref NativeArray<BoxMinMaxSoA> InBoxesMinMaxAoSoA,
+        ref NativeArray<byte> InVisMask,
+        ref int OutTransformCount,
         ref Matrix4x4[] OutTransforms,
-        Vector4 MinX,
-        Vector4 MaxX,
-        Vector4 MinY,
-        Vector4 MaxY,
-        Vector4 MinZ,
-        Vector4 MaxZ,
-        int ComponentIdx)
+        bool BytePerPacket)
     {
-        var Min = new Vector3(MinX[ComponentIdx], MinY[ComponentIdx], MinZ[ComponentIdx]);
-        var Max = new Vector3(MaxX[ComponentIdx], MaxY[ComponentIdx], MaxZ[ComponentIdx]);
-        OutTransforms[TransformIdx].SetTRS((Max + Min) * 0.5f, Quaternion.identity, (Max - Min) * 0.5f);
-        return TransformIdx + 1;
-    }
+        int TransformCount = 0;
+        var NumSoAPackets = InBoxesMinMaxAoSoA.Length;
+        if (InOutSoAPacketStart >= NumSoAPackets)
+        {
+            return;
+        }
 
-    static private int FilterOutCulledBoxes(
-        ref Vector4[] InBoxesMinMaxAoSoA,
-        ref byte[] InVisMask,
-        ref Matrix4x4[]
-        OutTransforms, bool BytePerPacket)
-    {
-        int NumTransforms = 0;
-        var NumSoAPackets = InBoxesMinMaxAoSoA.Length / 6;
+        UnityEngine.Assertions.Assert.AreEqual(NumSoAPackets, InVisMask.Length);
+        UnityEngine.Assertions.Assert.AreEqual(kMaxMeshesPerDrawBatch, (uint)OutTransforms.Length);
 
-
-        if (BytePerPacket)
-            UnityEngine.Assertions.Assert.AreEqual(NumSoAPackets, InVisMask.Length);
-        else
-            UnityEngine.Assertions.Assert.AreEqual((NumSoAPackets + 1) >> 1, InVisMask.Length);
-
-        UnityEngine.Assertions.Assert.AreEqual(NumSoAPackets, OutTransforms.Length >> 2);
-
-        for (int i = 0; i < NumSoAPackets; ++i)
+        int i;
+        for (i = InOutSoAPacketStart; i < NumSoAPackets; ++i)
         {
             var Byte = BytePerPacket ? InVisMask[i] : (InVisMask[i >> 1] >> ((i & 0x1) << 2));
 
             if (Byte != 0xf)
             {
-                var MinX = InBoxesMinMaxAoSoA[i * 6 + 0];
-                var MaxX = InBoxesMinMaxAoSoA[i * 6 + 1];
-                var MinY = InBoxesMinMaxAoSoA[i * 6 + 2];
-                var MaxY = InBoxesMinMaxAoSoA[i * 6 + 3];
-                var MinZ = InBoxesMinMaxAoSoA[i * 6 + 4];
-                var MaxZ = InBoxesMinMaxAoSoA[i * 6 + 5];
+                int TransformCountPerPacket = 0;
+
+                if ((Byte & 0x1) == 0) ++TransformCountPerPacket;
+                if ((Byte & 0x2) == 0) ++TransformCountPerPacket;
+                if ((Byte & 0x4) == 0) ++TransformCountPerPacket;
+                if ((Byte & 0x8) == 0) ++TransformCountPerPacket;
+
+                // NOTE: if all transform from current SoA box packet can't fit into the array of matrices, end the loop
+                // and return from the function giving a chance the calling code to process returned matrices
+                if (TransformCount + TransformCountPerPacket > kMaxMeshesPerDrawBatch)
+                {
+                    break;
+                }
+
+                var b = InBoxesMinMaxAoSoA[i];
 
                 if ((Byte & 0x1) == 0)
-                    NumTransforms = SetupTRS(NumTransforms, ref OutTransforms, MinX, MaxX, MinY, MaxY, MinZ, MaxZ, 0);
+                    b.ToTransformMatrix(ref OutTransforms, TransformCount ++, 0);
 
                 if ((Byte & 0x2) == 0)
-                    NumTransforms = SetupTRS(NumTransforms, ref OutTransforms, MinX, MaxX, MinY, MaxY, MinZ, MaxZ, 1);
+                    b.ToTransformMatrix(ref OutTransforms, TransformCount ++, 1);
 
                 if ((Byte & 0x4) == 0)
-                    NumTransforms = SetupTRS(NumTransforms, ref OutTransforms, MinX, MaxX, MinY, MaxY, MinZ, MaxZ, 2);
+                    b.ToTransformMatrix(ref OutTransforms, TransformCount ++, 2);
 
                 if ((Byte & 0x8) == 0)
-                    NumTransforms = SetupTRS(NumTransforms, ref OutTransforms, MinX, MaxX, MinY, MaxY, MinZ, MaxZ, 3);
+                    b.ToTransformMatrix(ref OutTransforms, TransformCount ++, 3);
             }
         }
-        return NumTransforms;
+        InOutSoAPacketStart = i;
+        OutTransformCount = TransformCount;
     }
 
 
@@ -500,18 +440,18 @@ public class FrustumCullSetupScript : MonoBehaviour
     }
 
     static private void CullBoxesAoSoA_Default(
-        ref byte[] OutVisibilityMask,
-        ref Vector4[] InBoxesMinMaxAoSoA,
+        ref NativeArray<byte> OutVisibilityMask,
+        ref NativeArray<BoxMinMaxSoA> InBoxesMinMaxAoSoA,
         ref Vector4[] InFrustumData,
         Vector3 FrustumAABBMax,
         Vector3 FrustumAABBMin,
         bool TestFrustumCorners)
     {
-        int NumSoAPackets = InBoxesMinMaxAoSoA.Length / 6;
+        int NumSoAPackets = InBoxesMinMaxAoSoA.Length;
 
         for (int i = 0; i < NumSoAPackets; ++i)
         {
-            var BoxMinMax = new BoxMinMaxSoA(ref InBoxesMinMaxAoSoA, i);
+            var BoxMinMax = InBoxesMinMaxAoSoA[i];
 
             var DotsL = MaxDotProductPlaneAABB(ref BoxMinMax, InFrustumData[0]);
             var DotsR = MaxDotProductPlaneAABB(ref BoxMinMax, InFrustumData[1]);
@@ -541,34 +481,68 @@ public class FrustumCullSetupScript : MonoBehaviour
         }
     }
 
-    [DllImport("UnityNativePlugin")]
-    private static extern void UnityNativePlugin_CountCulledBoxesAoSoA(
+    [DllImport("UnityNativePlugin-frustumcull")]
+    private static extern void frustumcull_aosoa4_aabb_stream_simd4_sse2(
         System.IntPtr OutVisibilityMask,
         System.IntPtr BoxesMinMaxAoSoA,
         System.IntPtr FrustumData,
         int count);
 
-    [DllImport("UnityNativePlugin")]
-    private static extern int UnitNativePluginSum(int a, int b);
+    [DllImport("UnityNativePlugin-frustumcull")]
+    private static extern void frustumcull_aosoa4_aabb_stream_simd4_avx(
+        System.IntPtr OutVisibilityMask,
+        System.IntPtr BoxesMinMaxAoSoA,
+        System.IntPtr FrustumData,
+        int count);
+
+    [DllImport("UnityNativePlugin-frustumcull")]
+    private static extern void frustumcull_aosoa4_aabb_stream_simd8_avx(
+        System.IntPtr OutVisibilityMask,
+        System.IntPtr BoxesMinMaxAoSoA,
+        System.IntPtr FrustumData,
+        int count);
+
+    [DllImport("UnityNativePlugin-frustumcull")]
+    private static extern void frustumcull_extratests_aosoa4_aabb_stream_simd4_sse2(
+        System.IntPtr OutVisibilityMask,
+        System.IntPtr BoxesMinMaxAoSoA,
+        System.IntPtr FrustumData,
+        int count);
+
+    [DllImport("UnityNativePlugin-frustumcull")]
+    private static extern void frustumcull_extratests_aosoa4_aabb_stream_simd4_avx(
+        System.IntPtr OutVisibilityMask,
+        System.IntPtr BoxesMinMaxAoSoA,
+        System.IntPtr FrustumData,
+        int count);
+
+    [DllImport("UnityNativePlugin-frustumcull")]
+    private static extern void frustumcull_extratests_aosoa4_aabb_stream_simd8_avx(
+        System.IntPtr OutVisibilityMask,
+        System.IntPtr BoxesMinMaxAoSoA,
+        System.IntPtr FrustumData,
+        int count);
 
     void Start()
     {
         FrustumData.Reserve(8);
 
-        if (BoxesMinMaxAoSoANative.IsCreated)
+        if (BoxesMinMaxAoSoA.IsCreated)
         {
-            Debug.Log("BoxesMinMaxAoSoANative: " + BoxesMinMaxAoSoANative);
-            BoxesMinMaxAoSoANative.Dispose();
+            Debug.Log("BoxesMinMaxAoSoA: " + BoxesMinMaxAoSoA);
+            BoxesMinMaxAoSoA.Dispose();
         }
+        MeshTransforms = new Matrix4x4[kMaxMeshesPerDrawBatch];
     }
 
     void OnDisable()
     {
-        if (BoxesMinMaxAoSoANative.IsCreated)
-            BoxesMinMaxAoSoANative.Dispose();
+        if (BoxesMinMaxAoSoA.IsCreated)
+            BoxesMinMaxAoSoA.Dispose();
 
-        VisibilityMask.Release();
-        BoxesMinMaxAoSoA.Release();
+        if (VisibilityMask.IsCreated)
+            VisibilityMask.Dispose();
+
         FrustumData.Release();
     }
 
@@ -598,10 +572,10 @@ public class FrustumCullSetupScript : MonoBehaviour
         var PointNBL = PointFrom3Planes(PlaneN, PlaneB, PlaneL);
         var PointNBR = PointFrom3Planes(PlaneN, PlaneB, PlaneR);
 
-        DebugDrawCross(PointNTL, RayDirFromPlanes(PlaneT, PlaneL), 0.3f);
-        DebugDrawCross(PointNTR, RayDirFromPlanes(PlaneR, PlaneT), 0.3f);
-        DebugDrawCross(PointNBL, RayDirFromPlanes(PlaneL, PlaneB), 0.3f);
-        DebugDrawCross(PointNBR, RayDirFromPlanes(PlaneB, PlaneR), 0.3f);
+        //DebugDrawCross(PointNTL, RayDirFromPlanes(PlaneT, PlaneL), 0.3f);
+        //DebugDrawCross(PointNTR, RayDirFromPlanes(PlaneR, PlaneT), 0.3f);
+        //DebugDrawCross(PointNBL, RayDirFromPlanes(PlaneL, PlaneB), 0.3f);
+        //DebugDrawCross(PointNBR, RayDirFromPlanes(PlaneB, PlaneR), 0.3f);
 
         var PointFTL = PointFrom3Planes(PlaneF, PlaneT, PlaneL);
         var PointFTR = PointFrom3Planes(PlaneF, PlaneT, PlaneR);
@@ -617,10 +591,10 @@ public class FrustumCullSetupScript : MonoBehaviour
                         Vector3.Max(Vector3.Max(PointNTL, PointNTR), Vector3.Max(PointNBL, PointNBR)));
 
 
-        DebugDrawCross(PointFTL, -RayDirFromPlanes(PlaneT, PlaneL), 1.3f);
-        DebugDrawCross(PointFTR, -RayDirFromPlanes(PlaneR, PlaneT), 1.3f);
-        DebugDrawCross(PointFBL, -RayDirFromPlanes(PlaneL, PlaneB), 1.3f);
-        DebugDrawCross(PointFBR, -RayDirFromPlanes(PlaneB, PlaneR), 1.3f);
+        //DebugDrawCross(PointFTL, -RayDirFromPlanes(PlaneT, PlaneL), 1.3f);
+        //DebugDrawCross(PointFTR, -RayDirFromPlanes(PlaneR, PlaneT), 1.3f);
+        //DebugDrawCross(PointFBL, -RayDirFromPlanes(PlaneL, PlaneB), 1.3f);
+        //DebugDrawCross(PointFBR, -RayDirFromPlanes(PlaneB, PlaneR), 1.3f);
 
         FrustumData.Array[0] = PlaneL;
         FrustumData.Array[1] = PlaneR;
@@ -631,168 +605,167 @@ public class FrustumCullSetupScript : MonoBehaviour
         FrustumData.Array[6] = new Vector4(FrustumAABBMin.x, FrustumAABBMax.x, FrustumAABBMin.y, FrustumAABBMax.y);
         FrustumData.Array[7] = new Vector4(FrustumAABBMin.z, FrustumAABBMax.z, FrustumAABBMin.z, FrustumAABBMax.z);
 
-        int NumSoAPackets = (NumMeshTranforms + 3) >> 2;
-        NumMeshTranforms = NumSoAPackets << 2;
+        int NumSoAPackets = (NumMeshTransforms + 3) >> 2;
+        NumMeshTransforms = NumSoAPackets << 2;
 
-        if (PrevNumMeshTransforms != NumMeshTranforms)
+        if (PrevNumMeshTransforms != NumMeshTransforms)
         {
             Debug.Log("Re-allocate AABB data because of size change.");
 
-            VisibilityMask.Reserve((NumSoAPackets + 1) >> 1);
+            if (VisibilityMask.IsCreated)
+                VisibilityMask.Dispose();
 
-            VisibilityMaskForParallel = new byte[NumSoAPackets];
+            if (BoxesMinMaxAoSoA.IsCreated)
+                BoxesMinMaxAoSoA.Dispose();
 
-            BoxesMinMaxAoSoA.Reserve(NumSoAPackets * 6);
-
-            Debug.Log("Native" + BoxesMinMaxAoSoANative);
-            if (BoxesMinMaxAoSoANative.IsCreated)
-                BoxesMinMaxAoSoANative.Dispose();
-
-            BoxesMinMaxAoSoANative = new NativeArray<Vector4>(BoxesMinMaxAoSoA.Array, Allocator.Persistent);
-
-            MeshTransforms = new Matrix4x4[NumMeshTranforms];
+#if UNITY_2019_1_OR_NEWER
+            BoxesMinMaxAoSoA = new NativeArray<BoxMinMaxSoA>(NumSoAPackets, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
+            VisibilityMask = new NativeArray<byte>(NumSoAPackets, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
+#else
+            BoxesMinMaxAoSoA = new NativeArray<BoxMinMaxSoA>(NumSoAPackets, Allocator.Persistent);
+            VisibilityMask = new NativeArray<byte>(NumSoAPackets, Allocator.Persistent);
+#endif
             RandomizeBoxes = true;
         }
-        PrevNumMeshTransforms = NumMeshTranforms;
+        PrevNumMeshTransforms = NumMeshTransforms;
 
         if (RandomizeBoxes)
         {
             UnityEngine.Random.InitState((int)(Time.time * 1000.0f));
+            var RandomExtendLimit = new Vector3(RandomExtentLimitX, RandomExtentLimitY, RandomExtentLimitZ);
+            var RandomDistance = new Vector2(RandomDistanceH, RandomDistanceV);
             for (int i = 0; i < NumSoAPackets; ++i)
             {
-                var c0 = RandomCenter();
-                var e0 = RandomExtent();
-
-                var c1 = RandomCenter();
-                var e1 = RandomExtent();
-
-                var c2 = RandomCenter();
-                var e2 = RandomExtent();
-
-                var c3 = RandomCenter();
-                var e3 = RandomExtent();
-
-                BoxesMinMaxAoSoA.Array[i * 6 + 0] = new Vector4(c0[0] - e0[0], c1[0] - e1[0], c2[0] - e2[0], c3[0] - e3[0]);
-                BoxesMinMaxAoSoA.Array[i * 6 + 1] = new Vector4(c0[0] + e0[0], c1[0] + e1[0], c2[0] + e2[0], c3[0] + e3[0]);
-                BoxesMinMaxAoSoA.Array[i * 6 + 2] = new Vector4(c0[1] - e0[1], c1[1] - e1[1], c2[1] - e2[1], c3[1] - e3[1]);
-                BoxesMinMaxAoSoA.Array[i * 6 + 3] = new Vector4(c0[1] + e0[1], c1[1] + e1[1], c2[1] + e2[1], c3[1] + e3[1]);
-                BoxesMinMaxAoSoA.Array[i * 6 + 4] = new Vector4(c0[2] - e0[2], c1[2] - e1[2], c2[2] - e2[2], c3[2] - e3[2]);
-                BoxesMinMaxAoSoA.Array[i * 6 + 5] = new Vector4(c0[2] + e0[2], c1[2] + e1[2], c2[2] + e2[2], c3[2] + e3[2]);
+                BoxesMinMaxAoSoA[i] = BoxMinMaxSoA.MakeRandom(RandomExtendLimit, RandomDistance);
             }
-            BoxesMinMaxAoSoANative.CopyFrom(BoxesMinMaxAoSoA.Array);
             RandomizeBoxes = false;
-        }
-
-        if (CullingJobType == JobType.ReferenceSerialOnly || CullingJobType == JobType.NativePluginSerialOnly)
-        {
-            CullingJobParallel = false;
         }
 
         if (CullingJobType == JobType.ReferenceSerialOnly)
         {
+            CullingJobParallel = false;
             UnityEngine.Profiling.Profiler.BeginSample("CullBoxesAoSoA_Default");
             CullBoxesAoSoA_Default(
-                ref VisibilityMask.Array,
-                ref BoxesMinMaxAoSoA.Array,
+                ref VisibilityMask,
+                ref BoxesMinMaxAoSoA,
                 ref FrustumData.Array,
                 FrustumAABBMax,
                 FrustumAABBMin,
                 TestFrustumCorners);
             UnityEngine.Profiling.Profiler.EndSample();
         }
-        else if (CullingJobType == JobType.NativePluginSerialOnly)
+        else if (CullingJobType >= JobType.NativePluginSimd4SSE2 && CullingJobType <= JobType.NativePluginSimd8AVX)
         {
-            UnityEngine.Profiling.Profiler.BeginSample("UnityNativePlugin_CountCulledBoxesAoSoA");
-            UnityNativePlugin_CountCulledBoxesAoSoA(
-                VisibilityMask.Address(),
-                BoxesMinMaxAoSoA.Address(),
-                FrustumData.Address(),
-                NumSoAPackets);
+            CullingJobParallel = false;
+            UnityEngine.Profiling.Profiler.BeginSample("UnityNativePlugin_FrustumCullNative");
+            if (TestFrustumCorners)
+            {
+                if (CullingJobType == JobType.NativePluginSimd4SSE2)
+                    frustumcull_extratests_aosoa4_aabb_stream_simd4_sse2(VisibilityMask.GetNativePtr(), BoxesMinMaxAoSoA.GetNativePtr(), FrustumData.Address(), NumSoAPackets);
+                else if (CullingJobType == JobType.NativePluginSimd4AVX)
+                    frustumcull_extratests_aosoa4_aabb_stream_simd4_avx(VisibilityMask.GetNativePtr(), BoxesMinMaxAoSoA.GetNativePtr(), FrustumData.Address(), NumSoAPackets);
+                else if (CullingJobType == JobType.NativePluginSimd8AVX)
+                    frustumcull_extratests_aosoa4_aabb_stream_simd8_avx(VisibilityMask.GetNativePtr(), BoxesMinMaxAoSoA.GetNativePtr(), FrustumData.Address(), NumSoAPackets);
+            }
+            else
+            {
+                if (CullingJobType == JobType.NativePluginSimd4SSE2)
+                    frustumcull_aosoa4_aabb_stream_simd4_sse2(VisibilityMask.GetNativePtr(), BoxesMinMaxAoSoA.GetNativePtr(), FrustumData.Address(), NumSoAPackets);
+                else if (CullingJobType == JobType.NativePluginSimd4AVX)
+                    frustumcull_aosoa4_aabb_stream_simd4_avx(VisibilityMask.GetNativePtr(), BoxesMinMaxAoSoA.GetNativePtr(), FrustumData.Address(), NumSoAPackets);
+                else if (CullingJobType == JobType.NativePluginSimd8AVX)
+                    frustumcull_aosoa4_aabb_stream_simd8_avx(VisibilityMask.GetNativePtr(), BoxesMinMaxAoSoA.GetNativePtr(), FrustumData.Address(), NumSoAPackets);
+            }
             UnityEngine.Profiling.Profiler.EndSample();
         }
+#if UNITY_2019_1_OR_NEWER
         else
         {
+            ICullingJob job;
+
+            var BoxMinMaxAoSoASlice = BoxesMinMaxAoSoA.Slice();
+
+            var JobData = new FrustumCullingJobData
+            {
+                MinXSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(0),
+                MaxXSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(16),
+                MinYSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(32),
+                MaxYSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(48),
+                MinZSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(64),
+                MaxZSlice = BoxMinMaxAoSoASlice.SliceWithStride<float4>(80),
+                Frustum_Plane0 = FrustumData.Array[0],
+                Frustum_Plane1 = FrustumData.Array[1],
+                Frustum_Plane2 = FrustumData.Array[2],
+                Frustum_Plane3 = FrustumData.Array[3],
+                Frustum_Plane4 = FrustumData.Array[4],
+                Frustum_Plane5 = FrustumData.Array[5],
+                Frustum_xXyY = FrustumData.Array[6],
+                Frustum_zZzZ = FrustumData.Array[7],
+                VisibilityMask = VisibilityMask,
+                TestFrustumCorners = TestFrustumCorners
+            };
+
+            if (CullingJobType == JobType.MathematicsBurstOptimized)
+                job = new FrustumCullBoxesAoSoAJob(ref JobData);
+            else
+                job = new FrustumCullBoxesAoSoAJob_NoBurst(ref JobData);
+
             if (CullingJobParallel)
             {
-                UnityEngine.Profiling.Profiler.BeginSample("BeginCullBoxesAoSoA_Parallel");
-                if (CullingJobType == JobType.MathematicsBurstOptimized)
-                {
-                    ParallelCullingJob = new CullingJob_Parallel();
-                    CullingJobHandle = ParallelCullingJob.Run(ref BoxesMinMaxAoSoANative, ref FrustumData.Array, TestFrustumCorners);
-                }
-                else
-                {
-                    ParallelCullingJobNoBurst = new CullingJob_ParallelNoBurst();
-                    CullingJobHandle = ParallelCullingJobNoBurst.Run(ref BoxesMinMaxAoSoANative, ref FrustumData.Array, TestFrustumCorners);
-                }
+                UnityEngine.Profiling.Profiler.BeginSample("FrustumCullBoxesAoSoA_Parallel");
+                job.RunParallelAndWait();
                 UnityEngine.Profiling.Profiler.EndSample();
             }
             else
             {
-                UnityEngine.Profiling.Profiler.BeginSample("BeginCullBoxesAoSoA_Serial");
-                if (CullingJobType == JobType.MathematicsBurstOptimized)
-                {
-                    SerialCullingJob = new CullingJob_Serial();
-                    CullingJobHandle = SerialCullingJob.Run(ref BoxesMinMaxAoSoANative, ref FrustumData.Array, TestFrustumCorners);
-                }
-                else
-                {
-                    SerialCullingJobNoBurst = new CullingJob_SerialNoBurst();
-                    CullingJobHandle = SerialCullingJobNoBurst.Run(ref BoxesMinMaxAoSoANative, ref FrustumData.Array, TestFrustumCorners);
-                }
+                UnityEngine.Profiling.Profiler.BeginSample("FrustumCullBoxesAoSoA_Serial");
+                job.RunSerial();
                 UnityEngine.Profiling.Profiler.EndSample();
             }
         }
+#endif
     }
 
     public void LateUpdate()
     {
-        if (CullingJobType != JobType.ReferenceSerialOnly && CullingJobType != JobType.NativePluginSerialOnly)
-        {
-
-            if (CullingJobParallel)
-            {
-                UnityEngine.Profiling.Profiler.BeginSample("EndCullBoxesAoSoA_Parallel");
-                if (CullingJobType == JobType.MathematicsBurstOptimized)
-                    ParallelCullingJob.Complete(CullingJobHandle, ref VisibilityMaskForParallel);
-                else
-                    ParallelCullingJobNoBurst.Complete(CullingJobHandle, ref VisibilityMaskForParallel);
-                UnityEngine.Profiling.Profiler.EndSample();
-            }
-            else
-            {
-                UnityEngine.Profiling.Profiler.BeginSample("EndCullBoxesAoSoA_Parallel");
-                if (CullingJobType == JobType.MathematicsBurstOptimized)
-                    SerialCullingJob.Complete(CullingJobHandle, ref VisibilityMaskForParallel);
-                else
-                    SerialCullingJobNoBurst.Complete(CullingJobHandle, ref VisibilityMaskForParallel);
-                UnityEngine.Profiling.Profiler.EndSample();
-            }
-        }
-
-        UnityEngine.Profiling.Profiler.BeginSample("FilterOutCulledBoxes");
-        if (CullingJobType != JobType.ReferenceSerialOnly && CullingJobType != JobType.NativePluginSerialOnly)
-            NumMeshesToDraw = FilterOutCulledBoxes(ref BoxesMinMaxAoSoA.Array, ref VisibilityMaskForParallel, ref MeshTransforms, true);
-        else
-            NumMeshesToDraw = FilterOutCulledBoxes(ref BoxesMinMaxAoSoA.Array, ref VisibilityMask.Array, ref MeshTransforms, false);
-        UnityEngine.Profiling.Profiler.EndSample();
-
         if (UnitCubeMesh && DefaultMaterial)
         {
             DefaultMaterial.enableInstancing = true;
-            Graphics.DrawMeshInstanced(
-                UnitCubeMesh,
-                0,
-                DefaultMaterial,
-                MeshTransforms,
-                Mathf.Min(NumMeshesToDraw, 1023),
-                null,
-                ShadowCastingMode.Off,
-                false,
-                0,
-                null,
-                LightProbeUsage.Off,
-                null);
+
+            int SoAPacketStart = 0;
+            NumMeshesToDraw = 0;
+
+            while (SoAPacketStart != BoxesMinMaxAoSoA.Length)
+            {
+                int TransformsCount = 0;
+
+                UnityEngine.Profiling.Profiler.BeginSample("FilterOutCulledBoxes");
+#if UNITY_2019_1_OR_NEWER
+                if (CullingJobType == JobType.MathematicsNoBurst || CullingJobType == JobType.MathematicsBurstOptimized)
+                    FilterOutCulledBoxes(ref SoAPacketStart, ref BoxesMinMaxAoSoA, ref VisibilityMask, ref TransformsCount, ref MeshTransforms, true);
+                else
+#endif
+                    FilterOutCulledBoxes(ref SoAPacketStart, ref BoxesMinMaxAoSoA, ref VisibilityMask, ref TransformsCount, ref MeshTransforms, false);
+                UnityEngine.Profiling.Profiler.EndSample();
+
+                Graphics.DrawMeshInstanced(
+                     UnitCubeMesh
+                    ,0
+                    ,DefaultMaterial
+                    ,MeshTransforms
+                    ,TransformsCount
+                    ,null
+                    ,ShadowCastingMode.Off
+                    ,false
+                    ,0
+                    ,null
+#if UNITY_2019_1_OR_NEWER
+                    ,LightProbeUsage.Off
+                    ,null
+#endif
+                );
+                NumMeshesToDraw += TransformsCount;
+            }
         }
     }
 }
