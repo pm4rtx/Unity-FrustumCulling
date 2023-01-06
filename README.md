@@ -26,10 +26,10 @@ using various approaches
 | Standard C# code                                                                              | ~115 ms
 | **Unity.Mathematics**                                                                         | ~150 ms
 | **Unity.Mathematics** + Multithreading (via **Unity.Jobs**)                                   | ~41.0 - 46.0 ms
-| **Unity.Mathematics** + **Burst**                                                             | ~0.80 - 2.60 ms
-| **Unity.Mathematics** + Multithreading (via **Unity.Jobs**) + **Burst**                       | ~0.21 - 0.60 ms
-| x86-64 native code (SSE2) via [**Native Plugin**](https://docs.unity3d.com/Manual/NativePlugins.html) (single core)| ~0.56 - 0.90 ms
-| x86-64 native code (AVX) via [**Native Plugin**](https://docs.unity3d.com/Manual/NativePlugins.html) (single core)| ~0.32 - 0.64 ms
+| **Unity.Mathematics** + **Burst**                                                             | ~0.76 - 0.93 ms
+| **Unity.Mathematics** + Multithreading (via **Unity.Jobs**) + **Burst**                       | ~0.21 - 0.36 ms
+| x86-64 native code (SSE2) via [**Native Plugin**](https://docs.unity3d.com/Manual/NativePlugins.html) (single core)| ~0.56 - 0.78 ms
+| x86-64 native code (AVX) via [**Native Plugin**](https://docs.unity3d.com/Manual/NativePlugins.html) (single core)| ~0.32 - 0.51 ms
 
 ![](https://raw.githubusercontent.com/pm4rtx/Unity-FrustumCulling/master/Preview/Showcase.png)
 
@@ -50,27 +50,27 @@ Below tables contain performance numbers for routines exposed through native plu
 
 |                                                       | Time (i7-4700 HQ)             | Throughput (i7-4700 HQ)|
 |------------------------------------------------------:|:-----------------------------:|:-----------------------------:|
-| `frustumcull_aosoa4_aabb_stream_simd4_sse2`           | ~0.35 ms                      | ~288 000 AABBs/ms             |
-| `frustumcull_aosoa8_aabb_stream_simd8_avx`            | ~0.18 ms                      | ~566 000 AABBs/ms             |
-| `frustumcull_aosoa4_aabb_stream_simd4_avx`            | ~0.32 ms                      | ~320 000 AABBs/ms             |
-| `frustumcull_aosoa4_aabb_stream_simd8_avx`            | ~0.19 ms                      | ~532 000 AABBs/ms             |
-| `frustumcull_extratests_aosoa4_aabb_stream_simd4_sse2`| ~0.43 ms                      | ~232 000 AABBs/ms             |
-| `frustumcull_extratests_aosoa8_aabb_stream_simd8_avx` | ~0.20 ms                      | ~500 000 AABBs/ms             |
-| `frustumcull_extratests_aosoa4_aabb_stream_simd4_avx` | ~0.37 ms                      | ~272 000 AABBs/ms             |
-| `frustumcull_extratests_aosoa4_aabb_stream_simd8_avx` | ~0.22 ms                      | ~456 000 AABBs/ms             |
+| `frustumcull_aosoa4_aabb_stream_simd4_sse2`           | ~0.33 ms                      | ~300 000 AABBs/ms             |
+| `frustumcull_aosoa8_aabb_stream_simd8_avx`            | ~0.17 ms                      | ~590 000 AABBs/ms             |
+| `frustumcull_aosoa4_aabb_stream_simd4_avx`            | ~0.30 ms                      | ~330 000 AABBs/ms             |
+| `frustumcull_aosoa4_aabb_stream_simd8_avx`            | ~0.18 ms                      | ~550 000 AABBs/ms             |
+| `frustumcull_extratests_aosoa4_aabb_stream_simd4_sse2`| ~0.40 ms                      | ~245 000 AABBs/ms             |
+| `frustumcull_extratests_aosoa8_aabb_stream_simd8_avx` | ~0.19 ms                      | ~520 000 AABBs/ms             |
+| `frustumcull_extratests_aosoa4_aabb_stream_simd4_avx` | ~0.35 ms                      | ~285 000 AABBs/ms             |
+| `frustumcull_extratests_aosoa4_aabb_stream_simd8_avx` | ~0.21 ms                      | ~470 000 AABBs/ms             |
 
 ### Cold cache
 
 |                                                       | Time (i7-4700 HQ)             | Throughput (i7-4700 HQ)|
 |------------------------------------------------------:|:-----------------------------:|:-----------------------------:|
-| `frustumcull_aosoa4_aabb_stream_simd4_sse2`           | ~0.50 ms                      | ~200 000 AABBs/ms             |
-| `frustumcull_aosoa8_aabb_stream_simd8_avx`            | ~0.33 ms                      | ~302 000 AABBs/ms             |
-| `frustumcull_aosoa4_aabb_stream_simd4_avx`            | ~0.48 ms                      | ~207 000 AABBs/ms             |
-| `frustumcull_aosoa4_aabb_stream_simd8_avx`            | ~0.36 ms                      | ~281 000 AABBs/ms             |
-| `frustumcull_extratests_aosoa4_aabb_stream_simd4_sse2`| ~0.59 ms                      | ~169 000 AABBs/ms             |
-| `frustumcull_extratests_aosoa8_aabb_stream_simd8_avx` | ~0.34 ms                      | ~290 000 AABBs/ms             |
-| `frustumcull_extratests_aosoa4_aabb_stream_simd4_avx` | ~0.52 ms                      | ~191 000 AABBs/ms             |
-| `frustumcull_extratests_aosoa4_aabb_stream_simd8_avx` | ~0.37 ms                      | ~268 000 AABBs/ms             |
+| `frustumcull_aosoa4_aabb_stream_simd4_sse2`           | ~0.35 ms                      | ~290 000 AABBs/ms             |
+| `frustumcull_aosoa8_aabb_stream_simd8_avx`            | ~0.20 ms                      | ~500 000 AABBs/ms             |
+| `frustumcull_aosoa4_aabb_stream_simd4_avx`            | ~0.32 ms                      | ~310 000 AABBs/ms             |
+| `frustumcull_aosoa4_aabb_stream_simd8_avx`            | ~0.21 ms                      | ~470 000 AABBs/ms             |
+| `frustumcull_extratests_aosoa4_aabb_stream_simd4_sse2`| ~0.42 ms                      | ~240 000 AABBs/ms             |
+| `frustumcull_extratests_aosoa8_aabb_stream_simd8_avx` | ~0.23 ms                      | ~450 000 AABBs/ms             |
+| `frustumcull_extratests_aosoa4_aabb_stream_simd4_avx` | ~0.36 ms                      | ~270 000 AABBs/ms             |
+| `frustumcull_extratests_aosoa4_aabb_stream_simd8_avx` | ~0.24 ms                      | ~420 000 AABBs/ms             |
 
 During the measurement, the data sets contained 100 000 bounding boxes arranged into array of structures of arrays (SoA)
 containing four or eight boxes (depending on expected routine input format):
